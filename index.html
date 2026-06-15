@@ -16,11 +16,15 @@
     --accent-2: #3b82f6;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Apple SD Gothic Neo", sans-serif;
     background: var(--bg);
     color: var(--text);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   header {
     display: flex;
@@ -45,13 +49,16 @@
   nav button.active { background: var(--accent-2); border-color: var(--accent-2); }
   nav button:hover { border-color: var(--accent-2); }
 
-  main { padding: 22px; max-width: 1200px; margin: 0 auto; }
+  main { padding: 18px 22px; max-width: 1200px; margin: 0 auto; width: 100%; flex: 1; min-height: 0; }
 
   /* Editor layout */
-  .editor { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
-  @media (max-width: 820px) { .editor { grid-template-columns: 1fr; } }
+  .editor { display: grid; grid-template-columns: 360px 1fr; gap: 24px; height: 100%; min-height: 0; }
+  @media (max-width: 820px) {
+    body { overflow: auto; }
+    .editor { grid-template-columns: 1fr; height: auto; }
+  }
 
-  .form { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .form { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; overflow-y: auto; min-height: 0; }
   .form h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 14px; }
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
@@ -63,11 +70,17 @@
   .row .field { flex: 1; }
   .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
-  .preview-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .preview-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; height: 100%; min-height: 0; }
   canvas {
-    border-radius: 16px; background: #000; max-width: 100%; height: auto;
+    border-radius: 16px; background: #000;
+    max-width: 100%; max-height: calc(100% - 92px);
+    width: auto; height: auto; aspect-ratio: 600 / 840;
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
+    cursor: pointer; touch-action: none;
   }
+  canvas.editing { cursor: grab; box-shadow: 0 0 0 3px var(--accent-2), 0 12px 40px rgba(0,0,0,.55); }
+  canvas.editing.dragging { cursor: grabbing; }
+  .hint { font-size: 12px; color: var(--muted); height: 14px; text-align: center; }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
   .btn {
     padding: 10px 18px; border-radius: 9px; border: none; cursor: pointer;
@@ -163,6 +176,7 @@
 
     <div class="preview-wrap">
       <canvas id="card" width="600" height="840"></canvas>
+      <div class="hint" id="hint">사진을 더블클릭하면 위치·확대 조정 모드로 들어갑니다</div>
       <div class="actions">
         <button class="btn btn-primary" id="save">저장 (IndexedDB)</button>
         <button class="btn btn-secondary" id="export">PNG 다운로드</button>
@@ -236,6 +250,11 @@ const dbApi = {
 let currentImage = null;     // HTMLImageElement
 let currentImageBlob = null; // 원본 Blob (저장용)
 let editingId = null;        // 편집 중인 카드 id (없으면 새 카드)
+let imgTransform = { zoom: 1, ox: 0, oy: 0 }; // 사진 확대/위치 (zoom 1 = 프레임에 꽉 채움)
+let editMode = false;        // 피그마식 사진 조정 모드
+
+/* 사진 영역 (캔버스 좌표 기준) */
+const PHOTO = { x: 40, y: 110, w: 520, h: 460 };
 
 const $ = (id) => document.getElementById(id);
 const fields = ['name','position','number','team','season','sport','rarity','s1','s2','s3','s4'];
@@ -276,13 +295,14 @@ function render() {
   }
 
   // 사진 영역
-  const px = 40, py = 110, pw = W - 80, ph = 460;
+  const px = PHOTO.x, py = PHOTO.y, pw = PHOTO.w, ph = PHOTO.h;
   ctx.save();
   roundRect(ctx, px, py, pw, ph, 18); ctx.clip();
   ctx.fillStyle = '#0b0f14';
   ctx.fillRect(px, py, pw, ph);
   if (currentImage) {
-    drawImageCover(ctx, currentImage, px, py, pw, ph);
+    const g = imageGeometry();
+    ctx.drawImage(currentImage, g.dx, g.dy, g.drawW, g.drawH);
   } else {
     ctx.fillStyle = 'rgba(255,255,255,.25)';
     ctx.font = '20px sans-serif';
@@ -294,6 +314,15 @@ function render() {
   // 사진 테두리
   ctx.strokeStyle = theme.accent; ctx.lineWidth = 3;
   roundRect(ctx, px, py, pw, ph, 18); ctx.stroke();
+
+  // 조정 모드 점선 표시
+  if (editMode) {
+    ctx.save();
+    ctx.setLineDash([12, 9]);
+    ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 4;
+    roundRect(ctx, px, py, pw, ph, 18); ctx.stroke();
+    ctx.restore();
+  }
 
   // 상단: 레어도 라벨 + 등번호
   ctx.fillStyle = theme.accent;
@@ -351,13 +380,23 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawImageCover(ctx, img, x, y, w, h) {
-  const ir = img.width / img.height;
-  const r = w / h;
-  let sw, sh, sx, sy;
-  if (ir > r) { sh = img.height; sw = sh * r; sx = (img.width - sw)/2; sy = 0; }
-  else { sw = img.width; sh = sw / r; sx = 0; sy = (img.height - sh)/2; }
-  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+/* 현재 transform 기준 사진 배치 계산 (+ 프레임을 항상 덮도록 offset clamp) */
+function imageGeometry() {
+  const baseScale = Math.max(PHOTO.w / currentImage.width, PHOTO.h / currentImage.height);
+  const eff = baseScale * imgTransform.zoom;
+  const drawW = currentImage.width * eff;
+  const drawH = currentImage.height * eff;
+  const cx = PHOTO.x + PHOTO.w / 2;
+  const cy = PHOTO.y + PHOTO.h / 2;
+  const maxOx = Math.max(0, (drawW - PHOTO.w) / 2);
+  const maxOy = Math.max(0, (drawH - PHOTO.h) / 2);
+  imgTransform.ox = Math.max(-maxOx, Math.min(maxOx, imgTransform.ox));
+  imgTransform.oy = Math.max(-maxOy, Math.min(maxOy, imgTransform.oy));
+  return {
+    eff, drawW, drawH,
+    dx: cx - drawW / 2 + imgTransform.ox,
+    dy: cy - drawH / 2 + imgTransform.oy,
+  };
 }
 
 /* ---------- 폼 데이터 ---------- */
@@ -384,8 +423,91 @@ $('photo').addEventListener('change', async (e) => {
   if (!file) return;
   currentImageBlob = file;
   currentImage = await loadImageFromBlob(file);
+  imgTransform = { zoom: 1, ox: 0, oy: 0 };
   render();
   saveDraftDebounced();
+});
+
+/* ---------- 피그마식 사진 조정 (더블클릭 → 드래그/휠) ---------- */
+const cv = $('card');
+
+function canvasPoint(e) {
+  const rect = cv.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (cv.width / rect.width),
+    y: (e.clientY - rect.top) * (cv.height / rect.height),
+  };
+}
+function inPhoto(p) {
+  return p.x >= PHOTO.x && p.x <= PHOTO.x + PHOTO.w && p.y >= PHOTO.y && p.y <= PHOTO.y + PHOTO.h;
+}
+function setEditMode(on) {
+  editMode = on && !!currentImage;
+  cv.classList.toggle('editing', editMode);
+  $('hint').textContent = editMode
+    ? '드래그: 이동 · 스크롤/트랙패드: 확대·축소 · 더블클릭 또는 ESC: 완료'
+    : '사진을 더블클릭하면 위치·확대 조정 모드로 들어갑니다';
+  render();
+}
+
+cv.addEventListener('dblclick', (e) => {
+  const p = canvasPoint(e);
+  if (!editMode) {
+    if (currentImage && inPhoto(p)) setEditMode(true);
+  } else {
+    setEditMode(false);
+    saveDraftDebounced();
+  }
+});
+
+let dragging = false, last = null;
+cv.addEventListener('pointerdown', (e) => {
+  if (!editMode) return;
+  const p = canvasPoint(e);
+  if (!inPhoto(p)) { setEditMode(false); saveDraftDebounced(); return; }
+  dragging = true;
+  last = { x: e.clientX, y: e.clientY };
+  cv.classList.add('dragging');
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const rect = cv.getBoundingClientRect();
+  imgTransform.ox += (e.clientX - last.x) * (cv.width / rect.width);
+  imgTransform.oy += (e.clientY - last.y) * (cv.height / rect.height);
+  last = { x: e.clientX, y: e.clientY };
+  render();
+});
+function endDrag() {
+  if (!dragging) return;
+  dragging = false;
+  cv.classList.remove('dragging');
+  saveDraftDebounced();
+}
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+cv.addEventListener('wheel', (e) => {
+  if (!editMode || !currentImage) return;
+  e.preventDefault();
+  const p = canvasPoint(e);
+  const g = imageGeometry();
+  const imgX = (p.x - g.dx) / g.eff;   // 커서 아래 이미지 픽셀
+  const imgY = (p.y - g.dy) / g.eff;
+  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  imgTransform.zoom = Math.max(1, Math.min(5, imgTransform.zoom * factor));
+  // 커서 지점이 그대로 유지되도록 offset 재계산
+  const baseScale = Math.max(PHOTO.w / currentImage.width, PHOTO.h / currentImage.height);
+  const newEff = baseScale * imgTransform.zoom;
+  const cx = PHOTO.x + PHOTO.w / 2, cy = PHOTO.y + PHOTO.h / 2;
+  imgTransform.ox = (p.x - imgX * newEff) - (cx - currentImage.width * newEff / 2);
+  imgTransform.oy = (p.y - imgY * newEff) - (cy - currentImage.height * newEff / 2);
+  render();
+  saveDraftDebounced();
+}, { passive: false });
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && editMode) { setEditMode(false); saveDraftDebounced(); }
 });
 
 /* ---------- 폼 변경 → 렌더 + 임시저장 ---------- */
@@ -395,7 +517,7 @@ let draftTimer;
 function saveDraftDebounced() {
   clearTimeout(draftTimer);
   draftTimer = setTimeout(async () => {
-    const draft = { fields: collect(), imageBlob: currentImageBlob, editingId };
+    const draft = { fields: collect(), imgTransform: { ...imgTransform }, imageBlob: currentImageBlob, editingId };
     try { await dbApi.saveDraft(draft); } catch (e) { /* ignore */ }
   }, 500);
 }
@@ -420,6 +542,7 @@ $('save').addEventListener('click', async () => {
     sport: data.sport,
     rarity: data.rarity,
     fields: data,
+    imgTransform: { ...imgTransform },
     imageBlob: currentImageBlob || null,
     thumbBlob,
     createdAt: editingId ? undefined : now,
@@ -455,6 +578,8 @@ $('reset').addEventListener('click', () => {
   editingId = null;
   currentImage = null;
   currentImageBlob = null;
+  imgTransform = { zoom: 1, ox: 0, oy: 0 };
+  setEditMode(false);
   $('photo').value = '';
   $('name').value = ''; $('position').value = ''; $('number').value = '';
   $('team').value = ''; $('season').value = '';
@@ -510,6 +635,8 @@ async function renderGallery() {
 async function loadCard(card, asDuplicate) {
   fill(card.fields);
   editingId = asDuplicate ? null : card.id;
+  imgTransform = card.imgTransform ? { ...card.imgTransform } : { zoom: 1, ox: 0, oy: 0 };
+  setEditMode(false);
   currentImageBlob = card.imageBlob || null;
   currentImage = card.imageBlob ? await loadImageFromBlob(card.imageBlob) : null;
   render();
@@ -538,7 +665,7 @@ $('export-all').addEventListener('click', async () => {
   for (const c of cards) {
     out.push({
       id: c.id, name: c.name, sport: c.sport, rarity: c.rarity, fields: c.fields,
-      createdAt: c.createdAt, updatedAt: c.updatedAt,
+      imgTransform: c.imgTransform, createdAt: c.createdAt, updatedAt: c.updatedAt,
       imageBlob: await blobToBase64(c.imageBlob),
       thumbBlob: await blobToBase64(c.thumbBlob),
     });
@@ -557,7 +684,7 @@ $('import-file').addEventListener('change', async (e) => {
     for (const c of arr) {
       await dbApi.put({
         id: c.id || uid(), name: c.name, sport: c.sport, rarity: c.rarity, fields: c.fields,
-        createdAt: c.createdAt, updatedAt: c.updatedAt,
+        imgTransform: c.imgTransform, createdAt: c.createdAt, updatedAt: c.updatedAt,
         imageBlob: await base64ToBlob(c.imageBlob),
         thumbBlob: await base64ToBlob(c.thumbBlob),
       });
@@ -591,6 +718,7 @@ function escapeHtml(s) {
     const draft = await dbApi.getDraft();
     if (draft) {
       if (draft.fields) fill(draft.fields);
+      if (draft.imgTransform) imgTransform = draft.imgTransform;
       editingId = draft.editingId || null;
       if (draft.imageBlob) {
         currentImageBlob = draft.imageBlob;
